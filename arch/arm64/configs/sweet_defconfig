@@ -1628,6 +1628,7 @@ CONFIG_P002_ATTRIBUTES=y
 # FingerprintCard fingerprint driver
 #
 # CONFIG_FPR_FPC is not set
+CONFIG_NTSYNC=y
 
 #
 # SCSI device support
