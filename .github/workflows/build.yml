@@ -1,44 +1,62 @@
 name: "Build Kernel"
 
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_name:
+        description: "Kernel Name"
+        required: true
+        type: string
+        default: "FranxxCORE"
+      codename:
+        description: "Codename Build"
+        required: true
+        type: string
+        default: "Rei-I"
+      clang_url:
+        description: "Direct URL Clang Toolchain (.tar.gz)"
+        required: true
+        type: string
+        default: "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
+
 env:
-  # --- NERV HQ CONFIGURATION ---
-  KERNEL_NAME: "FranxxCORE"
+  KERNEL_NAME: ${{ inputs.kernel_name }}
   DEVICE: "Sweet"
-  CODENAME: "Rei-I"
+  CODENAME: ${{ inputs.codename }}
   DEFCONFIG: "sweet_defconfig"
-  CLANG_VER: "r547379"
-  CLANG_URL: "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
-  
-  # --- MAGI SYSTEM IDENTITY ---
+  CLANG_URL: ${{ inputs.clang_url }}
+
   KBUILD_BUILD_USER: "RapliVX"
   KBUILD_BUILD_HOST: "NyarchLinux"
   TZ: "Asia/Jakarta"
-  
-  # --- SECURITY CLEARANCE ---
+
   TG_TOKEN: ${{ secrets.TG_TOKEN }}
   TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
 
-on:
-  workflow_dispatch:
-
 jobs:
-  # ------------------------------------------------------------------
-  # PHASE 0: PREPARATION (ENVIRONMENT SETUP)
-  # ------------------------------------------------------------------
   setup_env:
-    name: "🛠️ PREPARE // ENVIRONMENT"
+    name: "PREPARE // ENVIRONMENT"
     runs-on: ubuntu-22.04
     outputs:
-      clang_path: ${{ steps.clang_install.outputs.path }}
+      clang_ver: ${{ steps.parse_clang.outputs.version }}
     steps:
-      - name: "⚡ [CACHE] :: CLANG_TOOLCHAIN"
+      - name: "[PARSE] :: EXTRACT CLANG VERSION"
+        id: parse_clang
+        run: |
+          URL="${{ env.CLANG_URL }}"
+          FILENAME=$(basename "$URL")
+          VERSION="${FILENAME%.tar.gz}"
+          echo "Extracted Version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: "[CACHE] :: CLANG_TOOLCHAIN"
         id: cache-clang
         uses: actions/cache@v4
         with:
           path: aosp-clang
-          key: ${{ runner.os }}-clang-${{ env.CLANG_VER }}
+          key: ${{ runner.os }}-clang-${{ steps.parse_clang.outputs.version }}
 
-      - name: "🔧 [DOWNLOAD] :: CLANG_TOOLCHAIN"
+      - name: "[DOWNLOAD] :: CLANG_TOOLCHAIN"
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
           echo "Downloading Clang..."
@@ -46,11 +64,9 @@ jobs:
           mkdir -p aosp-clang
           tar -xf aosp-clang.tar.gz -C aosp-clang
           rm -f aosp-clang.tar.gz
-  # ------------------------------------------------------------------
-  # PHASE 1: PARALLEL SYNCHRONIZATION (MATRIX BUILD)
-  # ------------------------------------------------------------------
+
   synchronization:
-    name: "🛡️ ${{ matrix.unit }} // BUILD"
+    name: "${{ matrix.unit }} // BUILD"
     needs: setup_env
     runs-on: ubuntu-22.04
     strategy:
@@ -75,19 +91,19 @@ jobs:
             patch_miui: true
 
     steps:
-      - name: "⬢ [INIT] :: SOURCE_CHECKOUT"
+      - name: "[INIT] :: SOURCE_CHECKOUT"
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: "⚡ [RESTORE] :: CLANG_TOOLCHAIN"
+      - name: "[RESTORE] :: CLANG_TOOLCHAIN"
         uses: actions/cache@v4
         with:
           path: aosp-clang
-          key: ${{ runner.os }}-clang-${{ env.CLANG_VER }}
+          key: ${{ runner.os }}-clang-${{ needs.setup_env.outputs.clang_ver }}
           fail-on-cache-miss: true
 
-      - name: "⚡ [CACHE] :: CCACHE_ACCELERATION"
+      - name: "[CACHE] :: CCACHE_ACCELERATION"
         uses: actions/cache@v4
         with:
           path: ~/.ccache
@@ -95,30 +111,35 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-ccache-${{ matrix.variant }}-
             ${{ runner.os }}-ccache-
-      - name: "⬢ [SYSTEM] :: DEPENDENCIES"
+
+      - name: "[SYSTEM] :: DEPENDENCIES"
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
           bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
           git libncurses5-dev libssl-dev libxml2 libxml2-utils lzop make \
           python3 python3-pip unzip zip zlib1g-dev
-      - name: "⚙️ [CONFIG] :: CCACHE_SETUP"
+
+      - name: "[CONFIG] :: CCACHE_SETUP"
         run: |
           export PATH="/usr/lib/ccache:$PATH"
           ccache -M 2G
           ccache -o compression=true
           ccache -o compression_level=1
           ccache -z
-      - name: "🧹 [MOD] :: KSU_INTEGRATION"
+
+      - name: "[MOD] :: KSU_INTEGRATION"
         if: matrix.ksu == true
         run: |
-          echo "⚠️ INITIATING MAMBOSU PROTOCOL ..."
+          echo "INITIATING MAMBOSU PROTOCOL ..."
           curl -LSs "https://raw.githubusercontent.com/RapliVx/KernelSU-Next/refs/heads/hookless/kernel/setup.sh" | bash -s hookless
-      - name: "🧹 [MOD] :: KSU_PURGE"
+
+      - name: "[MOD] :: KSU_PURGE"
         if: matrix.ksu == false
         run: |
           sed -i '/CONFIG_KSU/d' arch/arm64/configs/${{ env.DEFCONFIG }}
-      - name: "🩹 [PATCH] :: MIUI_OPTIMIZATION"
+
+      - name: "[PATCH] :: MIUI_OPTIMIZATION"
         if: matrix.patch_miui == true
         run: |
           # Inline python script for reliability over sed
@@ -138,7 +159,8 @@ jobs:
                       with open(path, 'w') as f: f.write(content)
                       print(f'Patched dimensions for MIUI in {path}')
           "
-      - name: "⚔️ [COMPILE] :: KERNEL_BUILD"
+
+      - name: "[COMPILE] :: KERNEL_BUILD"
         run: |
           export PATH="${{ github.workspace }}/aosp-clang/bin:$PATH"
           export ARCH=arm64
@@ -151,10 +173,11 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             Image.gz dtbo.img dtb.img
-      - name: "📊 [STATS] :: CCACHE_REPORT"
+
+      - name: "[STATS] :: CCACHE_REPORT"
         run: ccache -s
 
-      - name: "📤 [UPLOAD] :: ARTIFACTS"
+      - name: "[UPLOAD] :: ARTIFACTS"
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.variant }}-unit
@@ -164,23 +187,20 @@ jobs:
             out/arch/arm64/boot/dtbo.img
           compression-level: 9
 
-  # ------------------------------------------------------------------
-  # PHASE 2: DEPLOYMENT (ZIPPING & RELEASING)
-  # ------------------------------------------------------------------
   human-instrumentality:
-    name: "🧬 PROTOCOL: FINAL_DOGMA"
+    name: "PROTOCOL: FINAL_DOGMA"
     runs-on: ubuntu-latest
-    needs: [synchronization]
+    needs: [setup_env, synchronization]
     permissions:
       contents: write
 
     steps:
-      - name: "📥 [COLLECT] :: ARTIFACTS"
+      - name: "[COLLECT] :: ARTIFACTS"
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
 
-      - name: "📦 [PACKAGE] :: ANYKERNEL3_ZIP"
+      - name: "[PACKAGE] :: ANYKERNEL3_ZIP"
         run: |
           mkdir -p release_zips
           git clone -q https://github.com/RapliVx/AnyKernel3.git -b sweet AnyKernel3
@@ -189,7 +209,7 @@ jobs:
           cat > AnyKernel3/banner << 'EOF'
            SORY                                  
            QXQVYXY                               
-           SNRXWYXZ                         RNKJOY          
+           SNRXWYXZ                        RNKJOY          
             YXYYYYYYXY                  PLOSUYXYOXNJCV          
               YXY YXYXSRV            VTV LZUKGLDDWPARAS          
                 YXYYYVUUUYY        QEAAAIXPNOJCEDLTAQAR          
@@ -204,10 +224,10 @@ jobs:
                               QLPQGJMYNJXPSSMWSVPOKRZXYY YWXTW   
                                   WUW QHSLTUVQPJNRSO YZZVTYTXU   
                                       UIKJUOMTOSULKR ZYYUXTYVW   
-                                      VTMTPGSJ         XVUYVYZ   
-                                      VYTRULUM         ZYWVWXZ   
-                                      WUVXSROP           YWWY    
-                                       YTQZLNR                   
+                                      VTMTPGSJ        XVUYVYZ   
+                                      VYTRULUM        ZYWVWXZ   
+                                      WUVXSROP          YWWY    
+                                       YTQZLNR                  
                                        PURTWU                   
                                        SOXXTU                   
                                         TQOSU                   
@@ -230,7 +250,8 @@ jobs:
               zip -r1 "../release_zips/${KERNEL_NAME}-${VARIANT}-${CODENAME}-$(date +'%Y%m%d').zip" * -x .git README.md
               cd ..
           done
-      - name: "⬆️ [RELEASE] :: GITHUB_RELEASE"
+
+      - name: "[RELEASE] :: GITHUB_RELEASE"
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "EVA-${{ github.run_number }}"
@@ -240,7 +261,8 @@ jobs:
             ### ⚠️ NERV SECURITY CLEARANCE REQUIRED
             **Mission:** Kernel Instrumentality
             **Device:** Redmi Note 10 Pro (sweet)
-            **Compiler:** Clang ${{ env.CLANG_VER }}
+            **Codename:** ${{ env.CODENAME }}
+            **Compiler:** ${{ needs.setup_env.outputs.clang_ver }}
             
             #### 📦 DEPLOYED UNITS:
             | Variant | KSU | MIUI Patch |
@@ -254,11 +276,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: "📡 [NOTIFY] :: TELEGRAM_BOT"
+      - name: "[NOTIFY] :: TELEGRAM_BOT"
         if: success()
         run: |
           MSG="<b>🚨 MAGI SYSTEM // MISSION COMPLETE 🚨</b>%0A%0A"
           MSG+="<b>TARGET:</b> ProjectEVA MAMBOSU%0A"
+          MSG+="<b>CODENAME:</b> ${{ env.CODENAME }}%0A"
           MSG+="<b>UNITS:</b> 4 Variants Deployed%0A"
           MSG+="🔗 <a href='https://github.com/${{ github.repository }}/releases/tag/EVA-${{ github.run_number }}'>ACCESS DATA TERMINAL</a>"
           
