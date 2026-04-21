@@ -1022,7 +1022,7 @@ static void adios_insert_requests(struct blk_mq_hw_ctx *hctx,
 }
 
 // Prepare a request before it is inserted into the scheduler
-static void adios_prepare_request(struct request *rq) {
+static void adios_prepare_request(struct request *rq, struct bio *bio) {
 	struct adios_data *ad = rq->q->elevator->elevator_data;
 	struct adios_rq_data *rd;
 
@@ -1432,7 +1432,8 @@ static void update_timer_callback(struct timer_list *t) {
 }
 
 // Handle the completion of a request
-static void adios_completed_request(struct request *rq, u64 now) {
+static void adios_completed_request(struct request *rq) {
+    u64 now = ktime_get_ns();
 	struct adios_data *ad = rq->q->elevator->elevator_data;
 	struct adios_rq_data *rd = get_rq_data(rq);
 	union adios_in_flight_rqs ifr = { .scalar = 0 };
@@ -2069,7 +2070,6 @@ static struct elv_fs_entry adios_sched_attrs[] = {
 static struct elevator_type mq_adios = {
 	.ops.mq = {
 		.limit_depth		= adios_limit_depth,
-		.depth_updated		= adios_depth_updated,
 		.request_merged		= adios_request_merged,
 		.requests_merged	= adios_merged_requests,
 		.bio_merge			= adios_bio_merge,
