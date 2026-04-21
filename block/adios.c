@@ -9,7 +9,6 @@
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/math.h>
 #include <linux/module.h>
 #include <linux/rbtree.h>
 #include <linux/sbitmap.h>
@@ -21,7 +20,6 @@
 #include <linux/list_sort.h>
 #include <linux/rcupdate.h>
 
-#include "elevator.h"
 #include "blk.h"
 #include "blk-mq.h"
 #include "blk-mq-sched.h"
@@ -32,7 +30,7 @@
  *
  * Tier 0 (Highest Priority): Emergency & System Integrity Requests
  * -----------------------------------------------------------------
- * - Target: Requests with the BLK_MQ_INSERT_AT_HEAD flag.
+ * - Target: Requests with the at_head flag.
  * - Purpose: For critical, non-negotiable operations such as device error
  *   recovery or flush sequences that must bypass all other scheduling logic.
  * - Implementation: Placed in a dedicated, high-priority FIFO queue
@@ -58,7 +56,7 @@
  *   depend on sequential I/O completion (e.g., file system mounts) and to
  *   provide low latency for interactive applications.
  * - Implementation: The deadline for these requests is set to their start
- *   time (`rq->start_time_ns`). This effectively enforces FIFO-like behavior
+ *   time (`rd->start_time_ns`). This effectively enforces FIFO-like behavior
  *   within the deadline-sorted red-black tree, preventing out-of-order
  *   execution of dependent synchronous operations.
  *
@@ -297,6 +295,7 @@ struct adios_rq_data {
 	struct request *rq;
 	u64 deadline;
 	u64 pred_lat;
+	u64 start_time_ns; /* Fallback for 4.14 */
 	u32 block_size;
 	bool managed;
 } __attribute__((aligned(64)));
@@ -335,6 +334,7 @@ static bool lm_update_small_buckets(struct latency_model *model,
 	u8  outlier_threshold_bucket = 0;
 	u8  outlier_percentile = LM_OUTLIER_PERCENTILE;
 	u8  reduction;
+	u8  i;
 
 	if (count_all)
 		outlier_percentile = 100;
@@ -343,7 +343,7 @@ static bool lm_update_small_buckets(struct latency_model *model,
 	threshold_weight = (total_weight * outlier_percentile) / 100;
 
 	// Identify the bucket that corresponds to the outlier threshold
-	for (u8 i = 0; i < LM_LAT_BUCKET_COUNT; i++) {
+	for (i = 0; i < LM_LAT_BUCKET_COUNT; i++) {
 		cumulative_weight += buckets[i].sum_of_weights;
 		if (cumulative_weight >= threshold_weight) {
 			outlier_threshold_bucket = i;
@@ -352,7 +352,7 @@ static bool lm_update_small_buckets(struct latency_model *model,
 	}
 
 	// Calculate the average latency, excluding outliers
-	for (u8 i = 0; i <= outlier_threshold_bucket; i++) {
+	for (i = 0; i <= outlier_threshold_bucket; i++) {
 		struct latency_bucket_small *bucket = &buckets[i];
 		if (i < outlier_threshold_bucket) {
 			sum_latency += bucket->weighted_sum_latency;
@@ -408,6 +408,7 @@ static bool lm_update_large_buckets(struct latency_model *model,
 	u8  outlier_threshold_bucket = 0;
 	u8  outlier_percentile = LM_OUTLIER_PERCENTILE;
 	u8  reduction;
+	u8  i;
 
 	if (count_all)
 		outlier_percentile = 100;
@@ -416,7 +417,7 @@ static bool lm_update_large_buckets(struct latency_model *model,
 	threshold_weight = (total_weight * outlier_percentile) / 100;
 
 	// Identify the bucket that corresponds to the outlier threshold
-	for (u8 i = 0; i < LM_LAT_BUCKET_COUNT; i++) {
+	for (i = 0; i < LM_LAT_BUCKET_COUNT; i++) {
 		cumulative_weight += buckets[i].sum_of_weights;
 		if (cumulative_weight >= threshold_weight) {
 			outlier_threshold_bucket = i;
@@ -425,7 +426,7 @@ static bool lm_update_large_buckets(struct latency_model *model,
 	}
 
 	// Calculate the average latency and block size, excluding outliers
-	for (u8 i = 0; i <= outlier_threshold_bucket; i++) {
+	for (i = 0; i <= outlier_threshold_bucket; i++) {
 		struct latency_bucket_large *bucket = &buckets[i];
 		if (i < outlier_threshold_bucket) {
 			sum_latency += bucket->weighted_sum_latency;
@@ -727,7 +728,7 @@ static void add_to_dl_tree(
 	 * - Needs to be FIFO within a same optype
 	 * - Relaxed order between different optypes
 	 * - basically needs to be processed in early time */
-	rd->deadline = rq->start_time_ns;
+	rd->deadline = rd->start_time_ns;
 
 	/* Tier-3: Aynchronous Requests
 	 * - Can be reordered and delayed freely */
@@ -808,23 +809,15 @@ static void remove_request(struct adios_data *ad, struct request *rq) {
 		q->last_merge = NULL;
 }
 
-// Convert a queue depth to the corresponding word depth for shallow allocation
-static int to_word_depth(struct blk_mq_hw_ctx *hctx, unsigned int qdepth) {
-	struct sbitmap_queue *bt = &hctx->sched_tags->bitmap_tags;
-	const unsigned int nrr = hctx->queue->nr_requests;
-
-	return ((qdepth << bt->sb.shift) + nrr - 1) / nrr;
-}
-
 // We limit the depth of request allocation for asynchronous and write requests
-static void adios_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data) {
+static void adios_limit_depth(unsigned int op, struct blk_mq_alloc_data *data) {
 	struct adios_data *ad = data->q->elevator->elevator_data;
 
 	// Do not throttle synchronous reads
-	if (op_is_sync(opf) && !op_is_write(opf))
+	if (op_is_sync(op) && !op_is_write(op))
 		return;
 
-	data->shallow_depth = to_word_depth(data->hctx, ad->async_depth);
+	data->shallow_depth = ad->async_depth;
 }
 
 // The number of requests in the queue was notified from the block layer
@@ -832,10 +825,11 @@ static void adios_depth_updated(struct blk_mq_hw_ctx *hctx) {
 	struct request_queue *q = hctx->queue;
 	struct adios_data *ad = q->elevator->elevator_data;
 	struct blk_mq_tags *tags = hctx->sched_tags;
+	unsigned int shift = tags->bitmap_tags->sb.shift;
 
-	ad->async_depth = q->nr_requests;
+	ad->async_depth = max(1U, 3 * (1U << shift)  / 4);
 
-	sbitmap_queue_min_shallow_depth(&tags->bitmap_tags, 1);
+	sbitmap_queue_min_shallow_depth(tags->bitmap_tags, ad->async_depth);
 }
 
 // Handle request merging after a merge operation
@@ -884,8 +878,8 @@ static bool adios_bio_merge(struct request_queue *q, struct bio *bio,
 }
 
 static bool merge_or_insert_to_dl_tree(struct adios_data *ad,
-		struct request *rq, struct request_queue *q, struct list_head *free) {
-	if (blk_mq_sched_try_insert_merge(q, rq, free))
+		struct request *rq, struct request_queue *q) {
+	if (blk_mq_sched_try_insert_merge(q, rq))
 		return true;
 
 	bool dl_idx = adios_optype_not_read(rq);
@@ -903,6 +897,7 @@ static bool merge_or_insert_to_dl_tree(struct adios_data *ad,
 static void insert_to_prio_queue(struct adios_data *ad,
 		struct request *rq, bool pq_idx) {
 	struct adios_rq_data *rd = get_rq_data(rq);
+	unsigned long flags;
 
 	/* We're sure that rd->managed == true */
 	union adios_in_flight_rqs ifr = {
@@ -911,17 +906,17 @@ static void insert_to_prio_queue(struct adios_data *ad,
 	};
 	atomic64_add(ifr.scalar, &ad->in_flight_rqs.atomic);
 
-	scoped_guard(spinlock_irqsave, &ad->pq_lock) {
+	spin_lock_irqsave(&ad->pq_lock, flags);
 		bool was_empty = list_empty(&ad->prio_queue[pq_idx]);
 		list_add_tail(&rq->queuelist, &ad->prio_queue[pq_idx]);
 		if (was_empty)
 			set_adios_state(ad, ADIOS_STATE_PQ, pq_idx, true);
-	}
+	spin_unlock_irqrestore(&ad->pq_lock, flags);
 }
 
 // Insert a request into the scheduler (after Read & Write models stabilized)
 static void insert_request_post_stability(struct blk_mq_hw_ctx *hctx,
-		struct request *rq, blk_insert_t insert_flags, struct list_head *free) {
+		struct request *rq, bool at_head) {
 	struct request_queue *q = hctx->queue;
 	struct adios_data *ad = q->elevator->elevator_data;
 	struct adios_rq_data *rd = get_rq_data(rq);
@@ -935,8 +930,8 @@ static void insert_request_post_stability(struct blk_mq_hw_ctx *hctx,
 	if (unlikely(rd->pred_lat > ad->lat_model_latency_limit))
 		rd->pred_lat = ad->lat_model_latency_limit;
 
-	/* Tier-0: BLK_MQ_INSERT_AT_HEAD Requests */
-	if (insert_flags & BLK_MQ_INSERT_AT_HEAD) {
+	/* Tier-0: at_head Requests */
+	if (at_head) {
 		insert_to_prio_queue(ad, rq, 0);
 		return;
 	}
@@ -950,25 +945,26 @@ static void insert_request_post_stability(struct blk_mq_hw_ctx *hctx,
 	 */
 	rq_is_flush = (rq->cmd_flags & REQ_OP_MASK) == REQ_OP_FLUSH;
 	if (eval_adios_state(ad, ADIOS_STATE_BP) || rq_is_flush) {
-		scoped_guard(spinlock_irqsave, &ad->barrier_lock) {
+		unsigned long flags;
+		spin_lock_irqsave(&ad->barrier_lock, flags);
 			if (rq_is_flush)
 				set_adios_state(ad, ADIOS_STATE_BP, 0, true);
 			list_add_tail(&rq->queuelist, &ad->barrier_queue);
-		}
+		spin_unlock_irqrestore(&ad->barrier_lock, flags);
 		return;
 	}
 
-	if (merge_or_insert_to_dl_tree(ad, rq, q, free))
+	if (merge_or_insert_to_dl_tree(ad, rq, q))
 		return;
 }
 
 // Insert a request into the scheduler (before Read & Write models stabilizes)
 static void insert_request_pre_stability(struct blk_mq_hw_ctx *hctx,
-		struct request *rq, blk_insert_t insert_flags, struct list_head *free) {
+		struct request *rq, bool at_head) {
 	struct adios_data *ad = hctx->queue->elevator->elevator_data;
 	struct adios_rq_data *rd = get_rq_data(rq);
 	u8 optype = adios_optype(rq);
-	u8 pq_idx = !(insert_flags & BLK_MQ_INSERT_AT_HEAD);
+	u8 pq_idx = at_head ? 0 : 1;
 	bool stable = false;
 
 	rd->managed = true;
@@ -993,15 +989,15 @@ static void insert_request_pre_stability(struct blk_mq_hw_ctx *hctx,
 // Insert multiple requests into the scheduler
 static void adios_insert_requests(struct blk_mq_hw_ctx *hctx,
 				   struct list_head *list,
-				   blk_insert_t insert_flags) {
+				   bool at_head) {
 	struct request_queue *q = hctx->queue;
 	struct adios_data *ad = q->elevator->elevator_data;
 	struct request *rq;
 	bool stop = false;
-	LIST_HEAD(free);
 
 	do {
-	scoped_guard(spinlock_irqsave, &ad->lock)
+	unsigned long flags;
+	spin_lock_irqsave(&ad->lock, flags);
 	for (int i = 0; i < ADIOS_MAX_INSERTS_PER_LOCK; i++) {
 		if (list_empty(list)) {
 			stop = true;
@@ -1010,12 +1006,12 @@ static void adios_insert_requests(struct blk_mq_hw_ctx *hctx,
 		rq = list_first_entry(list, struct request, queuelist);
 		list_del_init(&rq->queuelist);
 		if (likely(ad->models_stable))
-			insert_request_post_stability(hctx, rq, insert_flags, &free);
+			insert_request_post_stability(hctx, rq, at_head);
 		else
-			insert_request_pre_stability(hctx, rq, insert_flags, &free);
-	}} while (!stop);
-
-	blk_mq_free_requests(&free);
+			insert_request_pre_stability(hctx, rq, at_head);
+	}
+		spin_unlock_irqrestore(&ad->lock, flags);
+	} while (!stop);
 }
 
 // Prepare a request before it is inserted into the scheduler
@@ -1026,6 +1022,7 @@ static void adios_prepare_request(struct request *rq) {
 	rd = mempool_alloc(ad->rq_data_pool, GFP_ATOMIC);
 	memset(rd, 0, sizeof(*rd));
 	rd->rq = rq;
+	rd->start_time_ns = ktime_get_ns();
 	rq->elv.priv[0] = rd;
 }
 
@@ -1039,7 +1036,7 @@ static struct adios_rq_data *get_dl_first_rd(struct adios_data *ad, bool idx) {
 
 // Comparison function for sorting requests by block address
 static int cmp_rq_pos(void *priv,
-		const struct list_head *a, const struct list_head *b) {
+	struct list_head *a, struct list_head *b) {
 	struct request *rq_a = list_entry(a, struct request, queuelist);
 	struct request *rq_b = list_entry(b, struct request, queuelist);
 	u64 pos_a = blk_rq_pos(rq_a);
@@ -1097,7 +1094,8 @@ static bool fill_batch_queues(struct adios_data *ad, u64 tpl) {
 		bq_batch_order = ad->batch_order;
 
 	do {
-	scoped_guard(spinlock_irqsave, &ad->lock)
+	unsigned long flags;
+	spin_lock_irqsave(&ad->lock, flags);
 	for (int i = 0; i < ADIOS_MAX_DELETES_PER_LOCK; i++) {
 		bool has_base = false;
 
@@ -1154,7 +1152,7 @@ static bool fill_batch_queues(struct adios_data *ad, u64 tpl) {
 
 		// Add request to the corresponding batch queue
 		dest_idx = (bq_batch_order == ADIOS_BO_OPTYPE || optype == ADIOS_OTHER)?
-			optype : !!(rd->deadline != rq->start_time_ns);
+			optype : !!(rd->deadline != rd->start_time_ns);
 		dest_q = &ad->batch_queue[page][dest_idx];
 		list_add_tail(&rq->queuelist, dest_q);
 		ad->bq_state[page] |= 1U << dest_idx;
@@ -1162,7 +1160,9 @@ static bool fill_batch_queues(struct adios_data *ad, u64 tpl) {
 		optype_count[optype]++;
 		added_lat += rd->pred_lat;
 		count++;
-	}} while (!stop);
+	}
+		spin_unlock_irqrestore(&ad->lock, flags);
+	} while (!stop);
 
 	if (bq_batch_order == ADIOS_BO_ELEVATOR && ad->batch_count[page][1] > 1)
 			list_sort(NULL, &ad->batch_queue[page][1], cmp_rq_pos);
@@ -1246,9 +1246,10 @@ static inline bool bq_page_has_rq(u32 bq_state, bool page) {
 
 // Dispatch a request from the batch queues
 static struct request *dispatch_from_bq(struct adios_data *ad) {
-	struct request *rq;
+	struct request *rq = NULL;
+	unsigned long flags;
 
-	guard(spinlock_irqsave)(&ad->bq_lock);
+	spin_lock_irqsave(&ad->bq_lock, flags);
 
 	u32 state = get_adios_state(ad);
 	u32 bq_state = eval_this_adios_state(state, ADIOS_STATE_BQ);
@@ -1280,22 +1281,26 @@ static struct request *dispatch_from_bq(struct adios_data *ad) {
 		bool is_empty = !ad->bq_state[page];
 		if (is_empty)
 			set_adios_state(ad, ADIOS_STATE_BQ, page, false);
-		return rq;
 	}
-
-	return NULL;
+	spin_unlock_irqrestore(&ad->bq_lock, flags);
+	
+	return rq;
 }
 
 // Dispatch a request from the priority queue
 static struct request *dispatch_from_pq(struct adios_data *ad) {
 	struct request *rq = NULL;
+	unsigned long flags;
 
-	guard(spinlock_irqsave)(&ad->pq_lock);
+	spin_lock_irqsave(&ad->pq_lock, flags);
 	u32 pq_state = eval_adios_state(ad, ADIOS_STATE_PQ);
 	u8  pq_idx = pq_state >> 1;
 	struct list_head *q = &ad->prio_queue[pq_idx];
 
-	if (unlikely(list_empty(q))) return NULL;
+	if (unlikely(list_empty(q))) {
+		spin_unlock_irqrestore(&ad->pq_lock, flags);
+		return NULL;
+	}
 
 	rq = list_first_entry(q, struct request, queuelist);
 	list_del_init(&rq->queuelist);
@@ -1303,55 +1308,53 @@ static struct request *dispatch_from_pq(struct adios_data *ad) {
 		set_adios_state(ad, ADIOS_STATE_PQ, pq_idx, false);
 		update_elv_direction(ad);
 	}
+	spin_unlock_irqrestore(&ad->pq_lock, flags);
 	return rq;
 }
 
 static bool release_barrier_requests(struct adios_data *ad) {
 	u32 moved_count = 0;
 	LIST_HEAD(local_list);
+	unsigned long flags;
 
-	scoped_guard(spinlock_irqsave, &ad->barrier_lock) {
-		if (!list_empty(&ad->barrier_queue)) {
-			struct request *trq, *next;
-			bool first_barrier_moved = false;
+	spin_lock_irqsave(&ad->barrier_lock, flags);
+	if (!list_empty(&ad->barrier_queue)) {
+		struct request *trq, *next;
+		bool first_barrier_moved = false;
 
-			list_for_each_entry_safe(trq, next, &ad->barrier_queue, queuelist) {
-				if (!first_barrier_moved) {
-					list_del_init(&trq->queuelist);
-					insert_to_prio_queue(ad, trq, 1);
-					moved_count++;
-					first_barrier_moved = true;
-					continue;
-				}
-
-				if ((trq->cmd_flags & REQ_OP_MASK) == REQ_OP_FLUSH)
-					break;
-
-				list_move_tail(&trq->queuelist, &local_list);
+		list_for_each_entry_safe(trq, next, &ad->barrier_queue, queuelist) {
+			if (!first_barrier_moved) {
+				list_del_init(&trq->queuelist);
+				insert_to_prio_queue(ad, trq, 1);
 				moved_count++;
+				first_barrier_moved = true;
+				continue;
 			}
 
-			if (list_empty(&ad->barrier_queue))
-				set_adios_state(ad, ADIOS_STATE_BP, 0, false);
+			if ((trq->cmd_flags & REQ_OP_MASK) == REQ_OP_FLUSH)
+				break;
+
+			list_move_tail(&trq->queuelist, &local_list);
+			moved_count++;
 		}
+
+		if (list_empty(&ad->barrier_queue))
+			set_adios_state(ad, ADIOS_STATE_BP, 0, false);
 	}
+	spin_unlock_irqrestore(&ad->barrier_lock, flags);
 
 	if (!moved_count)
 		return false;
 
 	if (!list_empty(&local_list)) {
 		struct request *trq, *next;
-		LIST_HEAD(free_list);
 
 		/* ad->lock is already held */
 		list_for_each_entry_safe(trq, next, &local_list, queuelist) {
 			list_del_init(&trq->queuelist);
-			if (merge_or_insert_to_dl_tree(ad, trq, ad->queue, &free_list))
+			if (merge_or_insert_to_dl_tree(ad, trq, ad->queue))
 				continue;
 		}
-
-		if (!list_empty(&free_list))
-			blk_mq_free_requests(&free_list);
 	}
 
 	return true;
@@ -1378,8 +1381,10 @@ retry:
 	 */
 	if (eval_adios_state(ad, ADIOS_STATE_BP)) {
 		bool barrier_released = false;
-		scoped_guard(spinlock_irqsave, &ad->lock)
-			barrier_released = release_barrier_requests(ad);
+		unsigned long flags;
+		spin_lock_irqsave(&ad->lock, flags);
+		barrier_released = release_barrier_requests(ad);
+		spin_unlock_irqrestore(&ad->lock, flags);
 		if (barrier_released)
 			goto retry;
 	}
@@ -1432,10 +1437,10 @@ static void adios_completed_request(struct request *rq, u64 now) {
 		return;
 	}
 
-	u64 lct = pc->last_completed_time ?: rq->io_start_time_ns;
+	u64 lct = pc->last_completed_time ?: rd->start_time_ns;
 	pc->last_completed_time = (ifr.count) ? now : 0;
 
-	if (!rq->io_start_time_ns || !rd->block_size || unlikely(now < lct)) {
+	if (!rd->start_time_ns || !rd->block_size || unlikely(now < lct)) {
 		local_irq_restore(flags);
 		return;
 	}
@@ -1463,7 +1468,10 @@ static void adios_completed_request(struct request *rq, u64 now) {
 
 	latency_model_input(ad, &ad->latency_model[optype],
 		rd->block_size, latency, rd->pred_lat, weight);
-	timer_reduce(&ad->update_timer, jiffies + msecs_to_jiffies(100));
+		
+	unsigned long expires = jiffies + msecs_to_jiffies(100);
+	if (!timer_pending(&ad->update_timer) || time_before(expires, ad->update_timer.expires))
+		mod_timer(&ad->update_timer, expires);
 }
 
 // Clean up after a request is finished
@@ -1496,6 +1504,7 @@ static int adios_init_sched(struct request_queue *q, struct elevator_type *e) {
 	struct elevator_queue *eq;
 	int ret = -ENOMEM;
 	u8 optype = 0;
+	u8 i;
 
 	eq = elevator_alloc(q, e);
 	if (!eq) {
@@ -1534,10 +1543,10 @@ static int adios_init_sched(struct request_queue *q, struct elevator_type *e) {
 		goto destroy_rq_data_pool;
 	}
 
-	for (int i = 0; i < ADIOS_PQ_LEVELS; i++)
+	for (i = 0; i < ADIOS_PQ_LEVELS; i++)
 		INIT_LIST_HEAD(&ad->prio_queue[i]);
 
-	for (u8 i = 0; i < ADIOS_DL_TYPES; i++) {
+	for (i = 0; i < ADIOS_DL_TYPES; i++) {
 		ad->dl_tree[i] = RB_ROOT_CACHED;
 		ad->dl_prio[i] = default_dl_prio[i];
 	}
@@ -1599,7 +1608,7 @@ static int adios_init_sched(struct request_queue *q, struct elevator_type *e) {
 
 	eq->elevator_data = ad;
 
-	ad->is_rotational = !!(q->limits.features & BLK_FEAT_ROTATIONAL);
+	ad->is_rotational = !blk_queue_nonrot(q);
 	ad->global_latency_window = (ad->is_rotational)?
 		default_global_latency_window_rotational:
 		default_global_latency_window;
@@ -1619,9 +1628,6 @@ static int adios_init_sched(struct request_queue *q, struct elevator_type *e) {
 	INIT_LIST_HEAD(&ad->barrier_queue);
 
 	timer_setup(&ad->update_timer, update_timer_callback, 0);
-
-	/* We dispatch from request queue wide instead of hw queue */
-	blk_queue_flag_set(QUEUE_FLAG_SQ_SCHED, q);
 
 	ad->queue = q;
 	blk_stat_enable_accounting(q);
@@ -1656,14 +1662,15 @@ put_eq:
 // Clean up and free resources when exiting the scheduler
 static void adios_exit_sched(struct elevator_queue *e) {
 	struct adios_data *ad = e->elevator_data;
+	u8 i;
 
-	timer_shutdown_sync(&ad->update_timer);
+	del_timer_sync(&ad->update_timer);
 
 	WARN_ON_ONCE(!list_empty(&ad->barrier_queue));
-	for (int i = 0; i < 2; i++)
+	for (i = 0; i < 2; i++)
 		WARN_ON_ONCE(!list_empty(&ad->prio_queue[i]));
 
-	for (u8 i = 0; i < ADIOS_OPTYPES; i++) {
+	for (i = 0; i < ADIOS_OPTYPES; i++) {
 		struct latency_model *model = &ad->latency_model[i];
 		struct latency_model_params *params = rcu_access_pointer(model->params);
 
@@ -1684,8 +1691,6 @@ static void adios_exit_sched(struct elevator_queue *e) {
 
 	if (ad->dl_group_pool)
 		kmem_cache_destroy(ad->dl_group_pool);
-
-	blk_stat_disable_accounting(ad->queue);
 
 	kfree(ad);
 }
@@ -1865,14 +1870,16 @@ static ssize_t adios_read_priority_store(
 	struct adios_data *ad = e->elevator_data;
 	int prio;
 	int ret;
+	unsigned long flags;
 
 	ret = kstrtoint(page, 10, &prio);
 	if (ret || prio < -20 || prio > 19)
 		return -EINVAL;
 
-	guard(spinlock_irqsave)(&ad->lock);
+	spin_lock_irqsave(&ad->lock, flags);
 	ad->dl_prio[0] = prio;
 	ad->dl_bias = 0;
+	spin_unlock_irqrestore(&ad->lock, flags);
 
 	return count;
 }
