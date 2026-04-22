@@ -829,9 +829,12 @@ static void adios_depth_updated(struct blk_mq_hw_ctx *hctx) {
 	struct request_queue *q = hctx->queue;
 	struct adios_data *ad = q->elevator->elevator_data;
 	struct blk_mq_tags *tags = hctx->sched_tags;
-	unsigned int shift = tags->bitmap_tags.sb.shift;
-
-	ad->async_depth = max(1U, 3 * (1U << shift)  / 4);
+	if (tags) {
+		unsigned int shift = tags->bitmap_tags.sb.shift;
+		ad->async_depth = max(1U, 3 * (1U << shift)  / 4);
+	} else {
+		ad->async_depth = 1; // Falback
+	}
 }
 
 // Handle request merging after a merge operation
