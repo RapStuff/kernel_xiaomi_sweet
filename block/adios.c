@@ -881,10 +881,14 @@ static bool adios_bio_merge(struct blk_mq_hw_ctx *hctx, struct bio *bio) {
 }
 
 static bool merge_or_insert_to_dl_tree(struct adios_data *ad,
-		struct request *rq, struct request_queue *q) {
-	
-	if (blk_mq_sched_try_insert_merge(q, rq))
+		struct request *rq, struct request_queue *q, struct list_head *free_list) {
+	struct request *free_rq = NULL;
+
+	if (rq->bio && blk_mq_sched_try_merge(q, rq->bio, &free_rq)) {
+		if (free_rq)
+			list_add_tail(&free_rq->queuelist, free_list);
 		return true;
+	}
 
 	bool dl_idx = adios_optype_not_read(rq);
 	add_to_dl_tree(ad, dl_idx, rq);
@@ -921,46 +925,42 @@ static void insert_to_prio_queue(struct adios_data *ad,
 
 // Insert a request into the scheduler (after Read & Write models stabilized)
 static void insert_request_post_stability(struct blk_mq_hw_ctx *hctx,
-		struct request *rq, bool at_head) {
-	struct request_queue *q = hctx->queue;
-	struct adios_data *ad = q->elevator->elevator_data;
-	struct adios_rq_data *rd = get_rq_data(rq);
-	u8 optype = adios_optype(rq);
-	bool rq_is_flush;
+        struct request *rq, bool at_head, struct list_head *free_list) {
+    struct request_queue *q = hctx->queue;
+    struct adios_data *ad = q->elevator->elevator_data;
+    struct adios_rq_data *rd = get_rq_data(rq);
+    u8 optype = adios_optype(rq);
+    bool rq_is_flush;
 
-	rd->managed = true;
-	rd->block_size = blk_rq_bytes(rq);
-	rd->pred_lat =
-		latency_model_predict(&ad->latency_model[optype], rd->block_size);
-	if (unlikely(rd->pred_lat > ad->lat_model_latency_limit))
-		rd->pred_lat = ad->lat_model_latency_limit;
+    rd->managed = true;
+    rd->block_size = blk_rq_bytes(rq);
+    rd->pred_lat =
+        latency_model_predict(&ad->latency_model[optype], rd->block_size);
+    if (unlikely(rd->pred_lat > ad->lat_model_latency_limit))
+        rd->pred_lat = ad->lat_model_latency_limit;
 
-	/* Tier-0: at_head Requests */
-	if (at_head) {
-		insert_to_prio_queue(ad, rq, 0);
-		return;
-	}
+    /* Tier-0: at_head Requests */
+    if (at_head) {
+        insert_to_prio_queue(ad, rq, 0);
+        return;
+    }
 
-	/*
-	 * Strict Barrier Handling for REQ_OP_FLUSH:
-	 * If a flush request arrives, or if the scheduler is already in a
-	 * barrier-pending state, all subsequent requests are diverted to a
-	 * separate barrier_queue. This ensures that no new requests are processed
-	 * until all work preceding the barrier is complete.
-	 */
-	rq_is_flush = (rq->cmd_flags & REQ_OP_MASK) == REQ_OP_FLUSH;
-	if (eval_adios_state(ad, ADIOS_STATE_BP) || rq_is_flush) {
-		unsigned long flags;
-		spin_lock_irqsave(&ad->barrier_lock, flags);
-		if (rq_is_flush)
-			set_adios_state(ad, ADIOS_STATE_BP, 0, true);
-		list_add_tail(&rq->queuelist, &ad->barrier_queue);
-		spin_unlock_irqrestore(&ad->barrier_lock, flags);
-		return;
-	}
+    /*
+     * Strict Barrier Handling for REQ_OP_FLUSH:
+     */
+    rq_is_flush = (rq->cmd_flags & REQ_OP_MASK) == REQ_OP_FLUSH;
+    if (eval_adios_state(ad, ADIOS_STATE_BP) || rq_is_flush) {
+        unsigned long flags;
+        spin_lock_irqsave(&ad->barrier_lock, flags);
+        if (rq_is_flush)
+            set_adios_state(ad, ADIOS_STATE_BP, 0, true);
+        list_add_tail(&rq->queuelist, &ad->barrier_queue);
+        spin_unlock_irqrestore(&ad->barrier_lock, flags);
+        return;
+    }
 
-	if (merge_or_insert_to_dl_tree(ad, rq, q))
-		return;
+    if (merge_or_insert_to_dl_tree(ad, rq, q, free_list)) 
+        return;
 }
 
 // Insert a request into the scheduler (before Read & Write models stabilizes)
@@ -1000,6 +1000,7 @@ static void adios_insert_requests(struct blk_mq_hw_ctx *hctx,
 	struct request *rq;
 	bool stop = false;
 	int i;
+	LIST_HEAD(free_list);
 
 	do {
 		unsigned long flags;
@@ -1012,12 +1013,20 @@ static void adios_insert_requests(struct blk_mq_hw_ctx *hctx,
 			rq = list_first_entry(list, struct request, queuelist);
 			list_del_init(&rq->queuelist);
 			if (likely(ad->models_stable))
-				insert_request_post_stability(hctx, rq, at_head);
+				insert_request_post_stability(hctx, rq, at_head, &free_list);
 			else
 				insert_request_pre_stability(hctx, rq, at_head);
 		}
 		spin_unlock_irqrestore(&ad->lock, flags);
 	} while (!stop);
+
+	if (!list_empty(&free_list)) {
+		struct request *trq, *next;
+		list_for_each_entry_safe(trq, next, &free_list, queuelist) {
+			list_del_init(&trq->queuelist);
+			blk_mq_free_request(trq);
+		}
+	}
 }
 
 // Prepare a request before it is inserted into the scheduler
@@ -1334,7 +1343,7 @@ static struct request *dispatch_from_pq(struct adios_data *ad) {
 	return rq;
 }
 
-static bool release_barrier_requests(struct adios_data *ad) {
+static bool release_barrier_requests(struct adios_data *ad, struct list_head *free_list) {
 	u32 moved_count = 0;
 	LIST_HEAD(local_list);
 	unsigned long flags;
@@ -1371,10 +1380,9 @@ static bool release_barrier_requests(struct adios_data *ad) {
 	if (!list_empty(&local_list)) {
 		struct request *trq, *next;
 
-		/* ad->lock is already held */
 		list_for_each_entry_safe(trq, next, &local_list, queuelist) {
 			list_del_init(&trq->queuelist);
-			if (merge_or_insert_to_dl_tree(ad, trq, ad->queue))
+			if (merge_or_insert_to_dl_tree(ad, trq, ad->queue, free_list))
 				continue;
 		}
 	}
@@ -1388,6 +1396,7 @@ static struct request *adios_dispatch_request(struct blk_mq_hw_ctx *hctx) {
 	struct request *rq;
 	bool barrier_released;
 	unsigned long flags;
+	LIST_HEAD(free_list);
 
 retry:
 	rq = dispatch_from_pq(ad);
@@ -1406,8 +1415,17 @@ retry:
 	if (eval_adios_state(ad, ADIOS_STATE_BP)) {
 		barrier_released = false;
 		spin_lock_irqsave(&ad->lock, flags);
-		barrier_released = release_barrier_requests(ad);
+		barrier_released = release_barrier_requests(ad, &free_list);
 		spin_unlock_irqrestore(&ad->lock, flags);
+		
+		if (!list_empty(&free_list)) {
+			struct request *trq, *next;
+			list_for_each_entry_safe(trq, next, &free_list, queuelist) {
+				list_del_init(&trq->queuelist);
+				blk_mq_free_request(trq);
+			}
+		}
+
 		if (barrier_released)
 			goto retry;
 	}
