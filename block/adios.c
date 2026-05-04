@@ -887,6 +887,8 @@ static bool merge_or_insert_to_dl_tree(struct adios_data *ad,
 	if (rq->bio && blk_mq_sched_try_merge(q, rq->bio, &free_rq)) {
 		if (free_rq)
 			list_add_tail(&free_rq->queuelist, free_list);
+
+		list_add_tail(&rq->queuelist, free_list);
 		return true;
 	}
 
@@ -2087,6 +2089,7 @@ static struct elv_fs_entry adios_sched_attrs[] = {
 static struct elevator_type mq_adios = {
 	.ops.mq = {
 		.limit_depth		= adios_limit_depth,
+		.depth_updated		= adios_depth_updated,
 		.request_merged		= adios_request_merged,
 		.requests_merged	= adios_merged_requests,
 		.bio_merge			= adios_bio_merge,
@@ -2103,6 +2106,7 @@ static struct elevator_type mq_adios = {
 	.elevator_attrs = adios_sched_attrs,
 	.elevator_name = "adios",
 	.elevator_owner = THIS_MODULE,
+	.uses_mq = true,
 };
 MODULE_ALIAS("mq-adios-iosched");
 
