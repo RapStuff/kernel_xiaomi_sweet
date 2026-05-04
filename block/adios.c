@@ -2089,7 +2089,6 @@ static struct elv_fs_entry adios_sched_attrs[] = {
 static struct elevator_type mq_adios = {
 	.ops.mq = {
 		.limit_depth		= adios_limit_depth,
-		.depth_updated		= adios_depth_updated,
 		.request_merged		= adios_request_merged,
 		.requests_merged	= adios_merged_requests,
 		.bio_merge			= adios_bio_merge,
