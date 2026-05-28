@@ -18,7 +18,7 @@
 #ifndef __LN8000_CHARGER_H__
 #define __LN8000_CHARGER_H__
 
-//#define LN8000_DUAL_CONFIG	/* uncomment to enable DUAL chip operation */
+//#define LN8000_DUAL_CONFIG    /* uncomment to enable DUAL chip operation */
 //#define LN8000_DEBUG_SUPPORT
 
 /**
@@ -29,7 +29,7 @@
 /* register map description */
 enum ln8000_int1_desc {
     LN8000_MASK_FAULT_INT           = BIT(7),
-    LN8000_MASK_NTC_PROT_INT	    = BIT(6),
+    LN8000_MASK_NTC_PROT_INT        = BIT(6),
     LN8000_MASK_CHARGE_PHASE_INT    = BIT(5),
     LN8000_MASK_MODE_INT            = BIT(4),
     LN8000_MASK_REV_CURR_INT        = BIT(3),
@@ -61,7 +61,7 @@ enum ln8000_fault1_sts_desc {
     LN8000_MASK_VAC_UNPLUG_STS      = BIT(4),
     LN8000_MASK_VAC_OV_STS          = BIT(3),
     LN8000_MASK_VIN_OV_STS          = BIT(1),
-    LN8000_MASK_VFAULTS	            = ASSIGNED_BITS(6,0),
+    LN8000_MASK_VFAULTS             = ASSIGNED_BITS(6,0),
 };
 
 enum ln8000_fault2_sts_desc {
@@ -69,8 +69,8 @@ enum ln8000_fault2_sts_desc {
 };
 
 enum ln8000_ldo_sts_desc {
-    LN8000_MASK_VBAT_MIN_OK_STS	    = BIT(7),
-    LN8000_MASK_CHARGE_TERM_STS	    = BIT(5),
+    LN8000_MASK_VBAT_MIN_OK_STS     = BIT(7),
+    LN8000_MASK_CHARGE_TERM_STS     = BIT(5),
     LN8000_MASK_RECHARGE_STS        = BIT(4),
 };
 
@@ -99,7 +99,7 @@ enum ln8000_fault_ctrl_desc {
 
 enum ln8000_bc_op1_desc {
     LN8000_BIT_DUAL_FUNCTION_EN         = 2,
-    LN8000_BIT_DUAL_CFG	                = 1,
+    LN8000_BIT_DUAL_CFG                 = 1,
     LN8000_BIT_DUAL_LOCKOUT_EN          = 0,
 };
 
@@ -157,7 +157,7 @@ enum ln8000_role {
     LN_SECONDARY            = 0x1,
 };
 
-enum ln8000_opmode_{
+enum ln8000_opmode_ {
     LN8000_OPMODE_UNKNOWN   = 0x0,
     LN8000_OPMODE_STANDBY   = 0x1,
     LN8000_OPMODE_BYPASS    = 0x2,
@@ -210,18 +210,18 @@ enum ln8000_adc_hibernate_delay_desc {
 #define LN8000_VBAT_FLOAT_MIN           3725000     /* unit = uV */
 #define LN8000_VBAT_FLOAT_MAX           5000000
 #define LN8000_VBAT_FLOAT_LSB           5000
-#define LN8000_ADC_VOUT_STEP	        5000        /* 5mV= 5000uV LSB	(0V ~ 5.115V) */
-#define LN8000_ADC_VIN_STEP             16000       /* 16mV=16000uV LSB	(0V ~ 16.386V) */
-#define LN8000_ADC_VBAT_STEP	        5000        /* 5mV= 5000uV LSB	(0V ~ 5.115V) */
+#define LN8000_ADC_VOUT_STEP            5000        /* 5mV= 5000uV LSB  (0V ~ 5.115V) */
+#define LN8000_ADC_VIN_STEP             16000       /* 16mV=16000uV LSB (0V ~ 16.386V) */
+#define LN8000_ADC_VBAT_STEP            5000        /* 5mV= 5000uV LSB  (0V ~ 5.115V) */
 #define LN8000_ADC_VBAT_MIN             1000000     /* 1V */
-#define LN8000_ADC_VAC_STEP             16000       /* 16mV=16000uV LSB	(0V ~ 16.386V) */
-#define LN8000_ADC_VAC_OS               5	        
-#define LN8000_ADC_IIN_STEP             4890        /* 4.89mA=4890uA LSB	(0A ~ 5A) */
-#define LN8000_ADC_DIETEMP_STEP	        4350        /* 0.435C LSB = 4350dC/1000 (-25C ~ 160C) */
+#define LN8000_ADC_VAC_STEP             16000       /* 16mV=16000uV LSB (0V ~ 16.386V) */
+#define LN8000_ADC_VAC_OS               5       
+#define LN8000_ADC_IIN_STEP             4890        /* 4.89mA=4890uA LSB    (0A ~ 5A) */
+#define LN8000_ADC_DIETEMP_STEP         4350        /* 0.435C LSB = 4350dC/1000 (-25C ~ 160C) */
 #define LN8000_ADC_DIETEMP_DENOM        1000        /* 1000 */
-#define LN8000_ADC_DIETEMP_MIN	        (-250)      /* -25C = -250dC */
-#define LN8000_ADC_DIETEMP_MAX	        1600        /* 160C = 1600dC */
-#define LN8000_ADC_NTCV_STEP	        2933        /* 2.933mV=2933uV LSB	(0V ~ 3V) */
+#define LN8000_ADC_DIETEMP_MIN          (-250)      /* -25C = -250dC */
+#define LN8000_ADC_DIETEMP_MAX          1600        /* 160C = 1600dC */
+#define LN8000_ADC_NTCV_STEP            2933        /* 2.933mV=2933uV LSB   (0V ~ 3V) */
 #define LN8000_IIN_CFG_MIN              500000      /* 500mA=500,000uA */
 #define LN8000_IIN_CFG_LSB              50000       /* 50mA=50,000uA */
 
@@ -237,15 +237,15 @@ enum ln8000_adc_hibernate_delay_desc {
 
 /* bus protection values for QC */
 #define BUS_OVP_FOR_QC                  13000000 /* ln8000 didn't used 10V, (support tot 6.5V, 11V, 12V, 13V) */
-#define BUS_OVP_ALARM_FOR_QC			9500000
-#define BUS_OCP_FOR_QC_CLASS_A			3250000
+#define BUS_OVP_ALARM_FOR_QC            9500000
+#define BUS_OCP_FOR_QC_CLASS_A          3250000
 #define BUS_OCP_ALARM_FOR_QC_CLASS_A    2000000
-#define BUS_OCP_FOR_QC_CLASS_B			3750000
-#define BUS_OCP_ALARM_FOR_QC_CLASS_B	2800000
-#define BUS_OCP_FOR_QC3P5_CLASS_A		3000000
-#define BUS_OCP_ALARM_FOR_QC3P5_CLASS_A	2500000
-#define BUS_OCP_FOR_QC3P5_CLASS_B		3500000
-#define BUS_OCP_ALARM_FOR_QC3P5_CLASS_B	3200000
+#define BUS_OCP_FOR_QC_CLASS_B          3750000
+#define BUS_OCP_ALARM_FOR_QC_CLASS_B    2800000
+#define BUS_OCP_FOR_QC3P5_CLASS_A       3000000
+#define BUS_OCP_ALARM_FOR_QC3P5_CLASS_A 2500000
+#define BUS_OCP_FOR_QC3P5_CLASS_B       3500000
+#define BUS_OCP_ALARM_FOR_QC3P5_CLASS_B 3200000
 
 /**
  * driver instance structure definition
@@ -278,7 +278,7 @@ struct ln8000_info {
     struct device *dev;
     struct i2c_client *client;
     struct ln8000_platform_data *pdata;
-    struct power_supply	*psy_chg;
+    struct power_supply *psy_chg;
 
     struct mutex data_lock;
     struct mutex i2c_lock;
@@ -307,19 +307,19 @@ struct ln8000_info {
     bool iin_rc;                /* iin reverse current detected */
     bool volt_qual;             /* all voltages are qualified */
     bool usb_present;           /* usb plugged (present) */
-    bool chg_en;                /* charging enavbled */
+    bool chg_en;                /* charging enabled */
     bool rcp_en;                /* reverse current protection enabled */
     int vbat_ovp_alarm_th;      /* vbat ovp alarm threshold */
     int vin_ovp_alarm_th;       /* vin ovp alarm threshold */
     int iin_ocp_alarm_th;       /* iin ocp alarm threshold */
 
     /* ADC readings */
-    int	tbat_uV;                /* BAT temperature (NTC, uV) */
-    int	tbus_uV;                /* BUS temperature (NTC, uV) */
-    int	tdie_dC;                /* die temperature (deci-Celsius) */
-    int	vbat_uV;                /* battery voltage (uV) */
-    int	vbus_uV;                /* input voltage (uV) */
-    int	iin_uA;                 /* input current (uV) */
+    int tbat_uV;                /* BAT temperature (NTC, uV) */
+    int tbus_uV;                /* BUS temperature (NTC, uV) */
+    int tdie_dC;                /* die temperature (deci-Celsius) */
+    int vbat_uV;                /* battery voltage (uV) */
+    int vbus_uV;                /* input voltage (uV) */
+    int iin_uA;                 /* input current (uV) */
 
     /* VAC_OV control for QC3 */
     struct delayed_work vac_ov_work;
