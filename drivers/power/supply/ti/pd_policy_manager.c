@@ -356,18 +356,39 @@ static int usbpd_set_new_fcc_voter(struct usbpd_pm *pdpm)
 
 static void usbpd_check_cp_psy(struct usbpd_pm *pdpm)
 {
-	if (!pdpm->cp_psy) {
-		if (pm_config.cp_sec_enable)
-			pdpm->cp_psy = power_supply_get_by_name("bq2597x-master");
-		else
-			pdpm->cp_psy = power_supply_get_by_name("bq2597x-standalone");
-		if (!pdpm->cp_psy)
-		{
-			pdpm->cp_psy = power_supply_get_by_name("ln8000");
-			if (!pdpm->cp_psy)
-				pr_err("cp_psy not found\n");
+	const char *primary_psy;
+	const char *fallback_psy = "ln8000";
+	int retries = 3;
+
+	if (pdpm->cp_psy)
+		return;
+
+	if (pm_config.cp_sec_enable)
+		primary_psy = "bq2597x-master";
+	else
+		primary_psy = "bq2597x-standalone";
+
+	while (retries--) {
+		pdpm->cp_psy = power_supply_get_by_name(primary_psy);
+		if (pdpm->cp_psy) {
+			pr_info("attached to cp_psy: %s\n", primary_psy);
+			return;
+		}
+
+		pdpm->cp_psy = power_supply_get_by_name(fallback_psy);
+		if (pdpm->cp_psy) {
+			pr_info("attached to cp_psy: %s\n", fallback_psy);
+			return;
+		}
+
+		if (retries > 0) {
+			pr_debug("cp_psy not ready, retrying... (%d left)\n",
+				 retries);
+			msleep(100);
 		}
 	}
+
+	pr_err("cp_psy not found after retries, fast charging disabled\n");
 }
 
 static void usbpd_check_cp_sec_psy(struct usbpd_pm *pdpm)
@@ -1551,8 +1572,13 @@ static void usb_psy_change_work(struct work_struct *work)
 	}
 
 	if (val.intval != POWER_SUPPLY_TYPEC_PR_SINK &&
-			val.intval != POWER_SUPPLY_TYPEC_PR_DUAL)
+			val.intval != POWER_SUPPLY_TYPEC_PR_DUAL) {
+		if (pdpm->pd_active) {
+			pr_info("unplug detected: disconnecting PD session for OTG readiness\n");
+			usbpd_pd_contact(pdpm, false);
+		}
 		goto out;
+	}
 
 	ret = power_supply_get_property(pdpm->usb_psy,
 			POWER_SUPPLY_PROP_PD_ACTIVE, &val);
@@ -1564,7 +1590,7 @@ static void usb_psy_change_work(struct work_struct *work)
 	ret = power_supply_get_property(pdpm->usb_psy,
 			POWER_SUPPLY_PROP_PD_AUTHENTICATION, &pd_auth_val);
 	if (ret) {
-		pr_err("Failed to read typec power role\n");
+		pr_err("Failed to read typec pd authentication\n");
 		goto out;
 	}
 
