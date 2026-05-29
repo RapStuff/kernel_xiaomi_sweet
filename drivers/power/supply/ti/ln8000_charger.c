@@ -790,12 +790,20 @@ static int psy_chg_get_ti_alarm_status(struct ln8000_info *info)
         }
     }
     
-    /* If an unplug event occurs when vbus voltage lower then vin_start_up_th, switch to standby mode. */
-    if (info->chg_en && !(info->rcp_en)) {
+    /* If an unplug event occurs (low input current and minimal VBUS offset),
+     * force disable RCP and switch to standby mode to free the bus for OTG.
+     */
+    if (info->chg_en) {
         if (info->iin_uA < 70000 && v_offset < 100000) {
+            
+            /* Disable Reverse Current Protection if active */
+            if (info->rcp_en) {
+                ln8000_enable_rcp(info, 0);
+                info->rcp_en = 0;
+            }
             ln8000_change_opmode(info, LN8000_OPMODE_STANDBY);
-            ln_info("forced change standby_mode for prevent reverse current\n");
             info->chg_en = 0;
+            ln_info("unplug detected: entering standby, rcp disabled\n");
         }
     }
 
