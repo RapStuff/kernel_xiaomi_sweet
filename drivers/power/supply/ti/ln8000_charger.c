@@ -855,8 +855,13 @@ static int ln8000_charger_get_property(struct power_supply *psy,
         val->intval = psy_chg_get_charging_enabled(info);
         break;
     case POWER_SUPPLY_PROP_STATUS:
-        val->intval = 0;
-        break;
+		if (info->chg_en)
+			val->intval = POWER_SUPPLY_STATUS_CHARGING;
+		else if (info->usb_present)
+			val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
+		else
+			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+		break;
     case POWER_SUPPLY_PROP_PRESENT:
         val->intval = info->usb_present;
         break;
@@ -1171,47 +1176,42 @@ static int ln8000_read_int_value(struct ln8000_info *info, u32 *reg_val)
 
 static void vac_ov_control_work(struct work_struct *work)
 {
-    struct ln8000_info *info = container_of(work, struct ln8000_info, vac_ov_work.work);
-    int i, cnt, ta_detached, delay = 50;
-    u32 sys_st;
-    bool enable_vac_ov = 1;
+	struct delayed_work *dwork = to_delayed_work(work);
+	struct ln8000_info *info = container_of(dwork, struct ln8000_info, vac_ov_work);
+	u32 sys_st;
+	static int loop_cnt = 0;
+	static bool enable_vac_ov = 1;
 
-    ta_detached = 0;
-    cnt = 5000 / delay;
-    for (i = 0; i < cnt; ++i) {
-        ln8000_get_adc_data(info, LN8000_ADC_CH_VIN, &info->vbus_uV);
-        ln8000_read_reg(info, LN8000_REG_SYS_STS, &sys_st);
+	ln8000_get_adc_data(info, LN8000_ADC_CH_VIN, &info->vbus_uV);
+	ln8000_read_reg(info, LN8000_REG_SYS_STS, &sys_st);
 
-        if (enable_vac_ov) {
-            /* Check ADC_VIN during the 5sec, if vin higher then 10V, disable to vac_ov */
-            if (info->vbus_uV > 10000000) {
-                enable_vac_ov = 0;
-                ln8000_enable_vac_ov(info, enable_vac_ov);
-                ln_info("vac_ov=disable, vin=%dmV, i=%d, cnt=%d, delay=%d\n", info->vbus_uV/1000, i, cnt, delay);
-            }
-        } else {
-            /* After disabled vac_ov, if ADC_VIN lower then 7V goto the terminate work */
-            if (info->vbus_uV < 7000000) {
-                enable_vac_ov = 1;
-                ln_info("vac_ov=enable, vin=%dmV, i=%d, cnt=%d, delay=%d\n", info->vbus_uV/1000, i, cnt, delay);
-                goto teminate_work;
-            }
-        }
-        /* If judged 3 times by TA disconnected, goto the terminate work */
-        if (sys_st == 0x1) { /* it means entered shutdown mode */
-            ta_detached += 1;
-            ln_info("sys_st=0x%x, ta_detached=%d\n", sys_st, ta_detached);
-            if (ta_detached > 2) {
-                goto teminate_work;
-            }
-        }
+	if (enable_vac_ov) {
+		if (info->vbus_uV > 10000000) {
+			enable_vac_ov = 0;
+			ln8000_enable_vac_ov(info, enable_vac_ov);
+		}
+	} else {
+		if (info->vbus_uV < 7000000) {
+			enable_vac_ov = 1;
+			goto teminate_work;
+		}
+	}
 
-        msleep(delay);
-    }
+	if (sys_st == 0x1) {
+		goto teminate_work;
+	}
+
+	loop_cnt++;
+	if (loop_cnt < 100) { /* 100 * 50ms = 5 detik */
+		schedule_delayed_work(&info->vac_ov_work, msecs_to_jiffies(50));
+		return;
+	}
 
 teminate_work:
-    ln8000_enable_vac_ov(info, 1);
-    info->vac_ov_work_on = 0;
+	ln8000_enable_vac_ov(info, 1);
+	info->vac_ov_work_on = 0;
+	loop_cnt = 0;
+	enable_vac_ov = 1;
 }
 
 static void check_vac_ov_work(struct ln8000_info *info)
@@ -1332,7 +1332,7 @@ static int ln8000_irq_init(struct ln8000_info *info)
     }
     
     /* interrupt mask setting */
-    mask = LN8000_MASK_ADC_DONE_INT | LN8000_MASK_TIMER_INT | LN8000_MASK_MODE_INT | LN8000_MASK_REV_CURR_INT;
+    mask = LN8000_MASK_TIMER_INT | LN8000_MASK_MODE_INT | LN8000_MASK_REV_CURR_INT;
     if (info->pdata->tdie_prot_disable && info->pdata->tdie_reg_disable)
       mask |= LN8000_MASK_TEMP_INT;
     if (info->pdata->iin_reg_disable && info->pdata->vbat_reg_disable)
