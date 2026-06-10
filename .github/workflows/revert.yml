@@ -1,0 +1,35 @@
+name: Revert Specific Commits
+
+on:
+  workflow_dispatch:
+
+jobs:
+  revert-job:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Git Config
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Revert Commits
+        run: |
+          git revert --no-edit ba93e72d8e7be2b3cfc69cc3b6b68fe6c8645747
+          git revert --no-edit 44a768977d57532c90c418e1d82f918dc3358653
+          git revert --no-edit 74c4b2897194479fdd22c419dc57df34f3bc3d91
+          git revert --no-edit a462e5543b8162e4385ded6a50561352f90f54a0
+          git revert --no-edit 19fdb95f2460b69f9fa0f9d0c6e62a7204b15749
+          git revert --no-edit 7d61f8a848369b05d59714cdf77aa3786774e8c6
+          git revert --no-edit 1ad6eaa57df584fa9d1fb2608801d99676f9cfaf
+          git revert --no-edit 9a74b3a49bf2b34bbed88184bcef7cacc4ead3e4
+
+      - name: Push Changes
+        run: |
+          git push origin HEAD:${{ github.ref_name }}
