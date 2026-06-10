@@ -3,6 +3,9 @@ name: Revert Specific Commits
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   revert-job:
     runs-on: ubuntu-latest
